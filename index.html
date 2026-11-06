@@ -138,6 +138,7 @@ input:focus,select:focus{outline:2px solid var(--primary);outline-offset:-1px;bo
 .item .body b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .item .body .small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-weight:800;font-size:12px;flex:none;background:var(--surface-2);color:var(--muted)}
+.item.pend .body b{color:var(--muted)}
 .dot.in{background:var(--ok-soft);color:var(--ok)}.dot.cu{background:var(--warn-soft);color:var(--warn)}
 .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0 6px}
 .filters input{flex:1;min-width:150px;min-height:38px}
@@ -278,7 +279,6 @@ const ICON = {
 const S = {
   pin: '', user: null, cfg: null, movs: [], usuarios: null,
   vista: 'resumen', mes: mesHoy(), moneda: ls.get('gg.moneda') || 'ARS',
-  criterio: ls.get('gg.criterio') || 'cuota', // 'cuota' = crédito cuenta cuando vence cada cuota; 'compra' = monto total el mes de la compra
   rango: 6, filtroTipo: 'todos', busqueda: '', filtroCuotas: 'curso',
   cargadoEn: 0, cfgEdit: null, usrEdit: null,
 };
@@ -378,8 +378,14 @@ function itemsMes(mes, mon) {
   for (const m of S.movs) {
     if (m.moneda !== mon) continue;
     if (m.tipo === 'ingreso') { if (m.fecha.slice(0, 7) === mes) out.push({ k: 'ingreso', fecha: m.fecha, monto: m.monto, cat: 'Ingreso', m }); continue; }
-    if (m.modo === CRED && S.criterio === 'cuota') {
-      for (const c of cuotasDe(m)) if (c.mes === mes) out.push({ k: 'cuota', fecha: c.fecha, monto: c.valor, cat: m.categoria, m, c });
+    if (m.modo === CRED) {
+      // Tarjeta de crédito: sólo se descuenta cada cuota cuando se marca como pagada,
+      // en el mes de la fecha de pago y por el valor de la cuota (no el total).
+      // Las cuotas sin pagar que vencen en el mes se muestran como pendientes, sin descontarse.
+      for (const c of cuotasDe(m)) {
+        if (c.pago) { if (c.pago.fecha.slice(0, 7) === mes) out.push({ k: 'cuota', fecha: c.pago.fecha, monto: c.valor, cat: m.categoria, m, c }); }
+        else if (c.mes === mes) out.push({ k: 'pend', fecha: c.fecha, monto: c.valor, cat: m.categoria, m, c });
+      }
       continue;
     }
     if (m.fecha.slice(0, 7) === mes) out.push({ k: 'gasto', fecha: m.fecha, monto: m.monto, cat: m.categoria, m });
@@ -389,12 +395,13 @@ function itemsMes(mes, mon) {
 function totalesMes(mes, mon) {
   const it = itemsMes(mes, mon);
   let ing = 0, fij = 0, vari = 0;
-  for (const i of it) { if (i.k === 'ingreso') ing += i.monto; else if (tipoCat(i.cat) === 'fijo') fij += i.monto; else vari += i.monto; }
-  return { it, ing, fij, vari, gas: fij + vari, saldo: ing - fij - vari };
+  let pend = 0;
+  for (const i of it) { if (i.k === 'pend') pend += i.monto; else if (i.k === 'ingreso') ing += i.monto; else if (tipoCat(i.cat) === 'fijo') fij += i.monto; else vari += i.monto; }
+  return { it, ing, fij, vari, pend, gas: fij + vari, saldo: ing - fij - vari };
 }
 function porCategoria(it) {
   const mp = {};
-  for (const i of it) if (i.k !== 'ingreso') mp[i.cat] = (mp[i.cat] || 0) + i.monto;
+  for (const i of it) if (i.k !== 'ingreso' && i.k !== 'pend') mp[i.cat] = (mp[i.cat] || 0) + i.monto;
   return Object.entries(mp).map(([nombre, total]) => ({ nombre, total, tipo: tipoCat(nombre) })).sort((a, b) => b.total - a.total);
 }
 
@@ -436,8 +443,7 @@ function vLogin() {
 const selMes = () => `<div class="month"><button class="btn icon" data-act="mes" data-v="-1" aria-label="Mes anterior">${ICON.left}</button>
   <strong>${mesNombre(S.mes)}</strong><button class="btn icon" data-act="mes" data-v="1" aria-label="Mes siguiente">${ICON.right}</button></div>`;
 
-const segCriterio = () => `<div class="row"><span class="small muted">Compras con crédito:</span>
-  <div class="seg"><button data-act="criterio" data-v="cuota" aria-pressed="${S.criterio === 'cuota'}">Por cuota</button><button data-act="criterio" data-v="compra" aria-pressed="${S.criterio === 'compra'}">Por compra</button></div></div>`;
+const notaCredito = (t) => `<p class="hint" style="margin:-4px 0 0">Las compras con tarjeta de crédito se descuentan recién cuando marcás la cuota como pagada (en la pestaña Tarjetas), y sólo por el valor de esa cuota.${t && t.pend ? ` <span class="pill warn">Cuotas sin pagar que vencen este mes: ${money(t.pend)}</span>` : ''}</p>`;
 
 /* --- Resumen --- */
 function vResumen() {
@@ -456,14 +462,14 @@ function vResumen() {
       <div class="card kpi"><div class="label">Gastos</div><div class="value num">${money(t.gas)}</div><div class="sub"><span class="pill fijo">Fijos ${money(t.fij)}</span> <span class="pill var">Variables ${money(t.vari)}</span></div></div>
       <div class="card kpi"><div class="label">Saldo</div><div class="value num ${t.saldo >= 0 ? 'pos' : 'neg'}">${money(t.saldo)}</div><div class="sub">${ahorro === null ? 'Sin ingresos cargados' : ahorro >= 0 ? `Ahorrás el ${ahorro.toFixed(0)}% de tus ingresos` : `Gastás ${Math.abs(ahorro).toFixed(0)}% más de lo que ingresa`}</div></div>
     </div>
-    ${segCriterio()}
+    ${notaCredito(t)}
     <div class="card stack">
       <div class="row between"><h2>Gastos por categoría</h2></div>
       ${t.gas ? `<div class="split" title="Fijos vs variables"><i style="width:${(t.fij / t.gas) * 100}%;background:var(--fijo)"></i><i style="width:${(t.vari / t.gas) * 100}%;background:var(--var)"></i></div>` : ''}
       ${cats.length ? grupo('fijo', 'Fijos') + grupo('variable', 'Variables') : '<div class="empty">Todavía no hay gastos en este mes.</div>'}
     </div>
     <div class="card">
-      <div class="row between"><h2>Movimientos</h2><span class="small muted">${t.it.length} en total</span></div>
+      <div class="row between"><h2>Movimientos</h2><span class="small muted">${t.it.filter((i) => i.k !== 'pend').length} en total</span></div>
       <div class="filters">
         <div class="seg"><button data-act="filtroTipo" data-v="todos" aria-pressed="${S.filtroTipo === 'todos'}">Todos</button><button data-act="filtroTipo" data-v="gastos" aria-pressed="${S.filtroTipo === 'gastos'}">Gastos</button><button data-act="filtroTipo" data-v="ingresos" aria-pressed="${S.filtroTipo === 'ingresos'}">Ingresos</button></div>
         <input type="search" id="busqueda" placeholder="Buscar descripción, categoría, medio…" value="${esc(S.busqueda)}" aria-label="Buscar movimientos">
@@ -480,14 +486,19 @@ function listaHTML(it) {
   return `<div class="list">${l.map(filaMov).join('')}</div>`;
 }
 function filaMov(i) {
-  const cls = i.k === 'ingreso' ? 'in' : i.k === 'cuota' ? 'cu' : '';
-  const dot = i.k === 'ingreso' ? '+' : i.k === 'cuota' ? `${i.c.n}/${i.c.N}` : esc((i.cat || '?').slice(0, 2).toUpperCase());
+  const esCuota = i.k === 'cuota' || i.k === 'pend';
+  const cls = i.k === 'ingreso' ? 'in' : esCuota ? 'cu' : '';
+  const dot = i.k === 'ingreso' ? '+' : esCuota ? `${i.c.n}/${i.c.N}` : esc((i.cat || '?').slice(0, 2).toUpperCase());
   const medio = i.m.medio ? `${i.m.modo === BIL ? '' : i.m.modo === DEB ? 'Débito ' : i.m.modo === CRED ? 'Crédito ' : ''}${i.m.medio}` : i.m.modo;
-  const sub = i.k === 'ingreso' ? [fechaTxt(i.fecha), i.m.usuario] : [fechaTxt(i.fecha), i.cat, medio, i.m.usuario];
-  return `<button class="item" data-act="editar" data-id="${esc(i.m.id)}">
+  const sub = i.k === 'ingreso' ? [fechaTxt(i.fecha), i.m.usuario] : [(i.k === 'pend' ? 'vence ' : i.k === 'cuota' ? 'pagada ' : '') + fechaTxt(i.fecha), i.cat, medio, i.m.usuario];
+  const pill = i.k === 'cuota' ? ` <span class="pill ok">Cuota ${i.c.n}/${i.c.N} pagada</span>` : i.k === 'pend' ? ` <span class="pill warn">Cuota ${i.c.n}/${i.c.N} sin pagar</span>` : '';
+  const act = esCuota ? `data-act="cuota" data-id="${esc(i.m.id)}" data-n="${i.c.n}"` : `data-act="editar" data-id="${esc(i.m.id)}"`;
+  const monto = i.k === 'pend' ? `<span class="num muted" style="text-align:right;line-height:1.2"><s>${money(i.monto)}</s><br><span class="small">no descontado</span></span>`
+    : `<b class="num ${i.k === 'ingreso' ? 'pos' : ''}">${i.k === 'ingreso' ? '+' : '−'}${money(i.monto)}</b>`;
+  return `<button class="item${i.k === 'pend' ? ' pend' : ''}" ${act}>
     <span class="dot ${cls}">${dot}</span>
-    <span class="body"><b>${esc(i.m.descripcion || i.cat)}${i.k === 'cuota' ? ` <span class="pill warn">Cuota ${i.c.n}/${i.c.N}</span>` : ''}</b><span class="small muted">${sub.filter(Boolean).map(esc).join(' · ')}</span></span>
-    <b class="num ${i.k === 'ingreso' ? 'pos' : ''}">${i.k === 'ingreso' ? '+' : '−'}${money(i.monto)}</b></button>`;
+    <span class="body"><b>${esc(i.m.descripcion || i.cat)}${pill}</b><span class="small muted">${sub.filter(Boolean).map(esc).join(' · ')}</span></span>
+    ${monto}</button>`;
 }
 
 /* --- Tarjetas --- */
@@ -553,7 +564,7 @@ function vComparar() {
       <div class="card kpi"><div class="label">Gasto de ${mesNombre(cur.mes)}</div><div class="value num">${money(cur.gas)}</div><div class="sub">${varTot === null ? 'Sin dato del mes anterior' : `<span class="${varTot > 0 ? 'neg' : 'pos'}">${varTot > 0 ? '▲' : '▼'} ${Math.abs(varTot).toFixed(0)}%</span> vs. mes anterior`}</div></div>
       <div class="card kpi"><div class="label">Promedio mensual</div><div class="value num">${money(prom)}</div><div class="sub">Meses con gastos en el período</div></div>
     </div>
-    ${segCriterio()}
+    ${notaCredito(null)}
     <div class="card stack">
       <div class="row between"><div class="legend"><span><i style="background:var(--ok)"></i>Ingresos</span><span><i style="background:var(--primary)"></i>Gastos</span></div>
         <div class="seg"><button data-act="rango" data-v="6" aria-pressed="${n === 6}">6 meses</button><button data-act="rango" data-v="12" aria-pressed="${n === 12}">12 meses</button></div></div>
@@ -695,7 +706,7 @@ async function guardarForm() {
     const { mov } = await api('guardarMov', { mov: m });
     const i = S.movs.findIndex((x) => x.id === mov.id);
     if (i >= 0) S.movs[i] = mov; else S.movs.push(mov);
-    if (S.vista === 'resumen' && !(mov.modo === CRED && S.criterio === 'cuota')) S.mes = mov.fecha.slice(0, 7);
+    if (S.vista === 'resumen' && mov.modo !== CRED) S.mes = mov.fecha.slice(0, 7);
     if (mov.moneda !== S.moneda) { S.moneda = mov.moneda; ls.set('gg.moneda', S.moneda); }
     cerrarDlg(); render(); toast('Guardado ✓');
   } catch (e) { if (e.auth) { cerrarDlg(); return salir(); } err.textContent = e.message; btn.disabled = false; btn.textContent = 'Guardar'; }
@@ -773,7 +784,6 @@ document.addEventListener('click', async (e) => {
   switch (act) {
     case 'vista': S.vista = v; render(); window.scrollTo(0, 0); break;
     case 'moneda': S.moneda = v; ls.set('gg.moneda', v); render(); break;
-    case 'criterio': S.criterio = v; ls.set('gg.criterio', v); render(); break;
     case 'mes': S.mes = addMes(S.mes, +v); render(); break;
     case 'rango': S.rango = +v; render(); break;
     case 'filtroTipo': S.filtroTipo = v; render(); break;
